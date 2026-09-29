@@ -7,14 +7,15 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 
+from config import CORS_ORIGINS, MONGO_URL
 from dsa.route_finder import DEMO_GRAPH, base_fare_for_distance, shortest_path
 from models import Ticket, Train, User
-from routers import bookings
+from routers import bookings, users
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    client = AsyncIOMotorClient("mongodb://localhost:27017")
+    client = AsyncIOMotorClient(MONGO_URL)
     await init_beanie(client.smart_railway, document_models=[User, Train, Ticket])
     if not await Train.find_one():                     # seed one demo train
         found = shortest_path(DEMO_GRAPH, "Agra Cantt", "Lucknow")
@@ -28,9 +29,10 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Smart Railway API", lifespan=lifespan)
-app.add_middleware(CORSMiddleware, allow_origins=["http://localhost:5173"],
+app.add_middleware(CORSMiddleware, allow_origins=CORS_ORIGINS,
                    allow_methods=["*"], allow_headers=["*"])
 app.include_router(bookings.router)
+app.include_router(users.router)
 
 
 @app.get("/route")

@@ -19,21 +19,21 @@ from datetime import datetime, timezone
 from typing import List, Optional
 
 from beanie import PydanticObjectId
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from dsa.profit_optimizer import (
     FLASH_WINDOW_HOURS, cancellation_refund, dynamic_multiplier, dynamic_price,
     flash_resale_price, waitlist_limit,
 )
-from models import Ticket, TicketStatus, Train
+from auth import get_current_user
+from models import Ticket, TicketStatus, Train, User
 
 router = APIRouter(prefix="/bookings", tags=["bookings"])
 
 
 # ------------------------------------------------------------ schemas -------
 class ReserveIn(BaseModel):
-    user_id: PydanticObjectId
     train_id: PydanticObjectId
     passenger_name: str
     preferred_seat: Optional[int] = None
@@ -114,7 +114,8 @@ async def promote_waitlist(train: Train) -> List[str]:
 
 # ------------------------------------------------------------ endpoints -----
 @router.get("/availability/{train_id}")
-async def availability(train_id: PydanticObjectId):
+async def availability(train_id: PydanticObjectId,
+                       current_user: User = Depends(get_current_user)):
     """Live numbers for the UI: seats, waitlist, price, flash status."""
     train = await _get_train(train_id)
     confirmed = await _confirmed(train.id)
@@ -139,7 +140,8 @@ async def availability(train_id: PydanticObjectId):
 
 
 @router.post("/reserve", status_code=201)
-async def reserve(body: ReserveIn):
+async def reserve(body: ReserveIn,
+                  current_user: User = Depends(get_current_user)):
     train = await _get_train(body.train_id)
     hrs = hours_until(train.departure_time)
     if hrs <= 0:
@@ -160,7 +162,7 @@ async def reserve(body: ReserveIn):
             raise HTTPException(409, "Train full and waitlist closed")
         fare, seat, in_flash, status = price, None, False, TicketStatus.WAITLISTED
 
-    ticket = Ticket(pnr=uuid.uuid4().hex[:10].upper(), user_id=body.user_id,
+    ticket = Ticket(pnr=uuid.uuid4().hex[:10].upper(), user_id=current_user.id,
                     train_id=train.id, passenger_name=body.passenger_name,
                     seat_number=seat, status=status, fare_paid=fare, is_flash_sale=in_flash)
     await ticket.insert()
@@ -174,9 +176,11 @@ async def reserve(body: ReserveIn):
 
 
 @router.post("/{pnr}/cancel", response_model=CancelOut)
-async def cancel(pnr: str):
+async def cancel(pnr: str, current_user: User = Depends(get_current_user)):
     ticket = await Ticket.find_one(Ticket.pnr == pnr)
     if not ticket:
+        raise HTTPException(404, "Ticket not found")
+    if ticket.user_id != current_user.id:
         raise HTTPException(404, "Ticket not found")
     if ticket.status not in (TicketStatus.CONFIRMED, TicketStatus.WAITLISTED):
         raise HTTPException(400, f"Cannot cancel a {ticket.status} ticket")
@@ -206,9 +210,10 @@ async def cancel(pnr: str):
 
 
 @router.post("/{pnr}/check-in")
-async def check_in(pnr: str):
+async def check_in(pnr: str, current_user: User = Depends(get_current_user)):
     ticket = await Ticket.find_one(Ticket.pnr == pnr)
-    if not ticket or ticket.status != TicketStatus.CONFIRMED:
+    if (not ticket or ticket.user_id != current_user.id
+            or ticket.status != TicketStatus.CONFIRMED):
         raise HTTPException(404, "Confirmed ticket not found")
     ticket.checked_in = True
     await ticket.save()
@@ -217,7 +222,8 @@ async def check_in(pnr: str):
 
 @router.post("/no-show-sweep/{train_id}")
 async def no_show_sweep(train_id: PydanticObjectId, cutoff_minutes: int = 30,
-                        force: bool = False):
+                        force: bool = False,
+                        current_user: User = Depends(get_current_user)):
     """
     Run at chart-preparation time (default 30 min before departure; use
     force=true in the demo). Un-checked-in tickets become NO_SHOW, the fare

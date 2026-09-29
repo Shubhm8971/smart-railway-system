@@ -17,6 +17,8 @@ const MOCK = {
 
 // One place decides what the badge says, so the UI and the pitch stay consistent.
 function statusOf(a) {
+  if (a.hours_left <= 0)
+    return { label: "Departed", tone: "bg-slate-200 text-slate-600 ring-slate-300", cta: null };
   if (a.available_seats === 0)
     return a.waitlist_count < a.waitlist_limit
       ? { label: "Waitlist open", tone: "bg-amber-100 text-amber-900 ring-amber-300", cta: "Join waitlist" }
@@ -28,24 +30,33 @@ function statusOf(a) {
   return { label: `${a.available_seats} seats available`, tone: "bg-sky-100 text-sky-900 ring-sky-300", cta: "Book seat" };
 }
 
-export default function SeatSelection({ trainId, userId }) {
+export default function SeatSelection({ trainId, token, onUnauthorized }) {
   const [data, setData] = useState(null);
   const [live, setLive] = useState(true);
   const [seat, setSeat] = useState(null);
   const [name, setName] = useState("");
   const [msg, setMsg] = useState(null);
+  const [connectionError, setConnectionError] = useState("");
 
   const load = useCallback(async () => {
     try {
-      const r = await fetch(`${API}/bookings/availability/${trainId}`);
-      if (!r.ok) throw new Error(r.status);
+      const r = await fetch(`${API}/bookings/availability/${trainId}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!r.ok) {
+        const result = await r.json().catch(() => ({}));
+        if (r.status === 401) onUnauthorized?.();
+        throw new Error(result.detail ?? `Availability request failed (${r.status})`);
+      }
       setData(await r.json());
       setLive(true);
-    } catch {
+      setConnectionError("");
+    } catch (error) {
       setData((d) => d ?? MOCK);          // demo fallback
       setLive(false);
+      setConnectionError(error.message || "Could not reach the railway API");
     }
-  }, [trainId]);
+  }, [trainId, token, onUnauthorized]);
 
   useEffect(() => {
     load();
@@ -65,10 +76,14 @@ export default function SeatSelection({ trainId, userId }) {
     try {
       const r = await fetch(`${API}/bookings/reserve`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ user_id: userId, train_id: trainId, passenger_name: name, preferred_seat: seat }),
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ train_id: trainId, passenger_name: name, preferred_seat: seat }),
       });
       const j = await r.json();
+      if (r.status === 401) onUnauthorized?.();
       if (!r.ok) throw new Error(j.detail ?? "Booking failed");
       setMsg({ ok: true, text: `${j.status}: PNR ${j.pnr}${j.seat_number ? `, seat ${j.seat_number}` : ""}` });
       setSeat(null);
@@ -154,7 +169,7 @@ export default function SeatSelection({ trainId, userId }) {
         </div>
       )}
       {msg && <p className={`mt-3 text-sm ${msg.ok ? "text-emerald-700" : "text-red-700"}`}>{msg.text}</p>}
-      {!live && <p className="mt-3 text-xs text-amber-700">Showing demo data. Start the API to go live.</p>}
+      {!live && <p className="mt-3 text-xs text-amber-700">Showing demo data. {connectionError}</p>}
     </section>
   );
 }
